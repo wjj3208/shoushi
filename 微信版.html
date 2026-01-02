@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 核心：禁止缩放，强制适配手机屏幕宽度 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>3D手势粒子 (微信适配版)</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #050505; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            touch-action: none; /* 禁止下拉刷新等默认行为 */
+        }
+        canvas { display: block; }
+
+        /* 
+           微信适配关键点：
+           视频不能 display:none，否则X5内核可能不解码。
+           必须移出屏幕外。
+        */
+        #input_video { 
+            position: absolute; 
+            top: -9999px; 
+            left: -9999px; 
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+        }
+
+        /* 启动遮罩层 */
+        #start-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95);
+            z-index: 999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            color: white;
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #start-overlay h2 { margin-top: 0; color: #00d2ff; }
+        #start-overlay p { color: #ccc; line-height: 1.6; font-size: 14px; margin-bottom: 30px; }
+        
+        #start-btn {
+            padding: 15px 50px;
+            background: linear-gradient(45deg, #00d2ff, #007aff);
+            color: #fff;
+            border: none;
+            border-radius: 50px;
+            font-size: 18px;
+            font-weight: bold;
+            box-shadow: 0 4px 15px rgba(0, 210, 255, 0.4);
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        #start-btn:active { transform: scale(0.95); }
+
+        /* UI 面板 - 移动优先设计 */
+        #ui-container {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(20, 20, 20, 0.9);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px); /* iOS兼容 */
+            padding: 15px 15px 30px 15px; /* 底部增加Padding适配iPhone横条 */
+            box-sizing: border-box;
+            border-radius: 20px 20px 0 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.15);
+            color: #fff;
+            transition: transform 0.3s ease;
+            z-index: 10;
+        }
+
+        /* 收起/展开把手 */
+        #ui-handle {
+            width: 40px;
+            height: 5px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 5px;
+            margin: -5px auto 15px auto;
+        }
+
+        h2.panel-title { 
+            margin: 0 0 15px 0; 
+            font-size: 16px; 
+            font-weight: 500; 
+            display: flex; 
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 8px; font-size: 12px; color: #888; text-transform: uppercase; }
+
+        /* 按钮网格 */
+        #shape-buttons {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr); /* 一行3个 */
+            gap: 8px;
+        }
+
+        .shape-btn {
+            padding: 10px 0;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            color: #ddd;
+            border-radius: 8px;
+            font-size: 13px;
+            text-align: center;
+            transition: all 0.2s;
+        }
+        .shape-btn.active { background: #00d2ff; color: #000; font-weight: bold; border-color: #00d2ff; }
+
+        input[type="color"] {
+            -webkit-appearance: none;
+            border: none;
+            width: 100%;
+            height: 40px;
+            border-radius: 8px;
+            background: none;
+        }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type="color"]::-webkit-color-swatch { border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; }
+
+        /* 状态指示器 - 移到左上角 */
+        #status-bar {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            right: 15px; /* 限制宽度防止溢出 */
+            display: flex;
+            align-items: flex-start;
+            pointer-events: none;
+            z-index: 5;
+        }
+
+        #status-text {
+            background: rgba(0,0,0,0.6);
+            color: #00d2ff;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            backdrop-filter: blur(4px);
+        }
+
+        /* 摄像头小窗 */
+        #webcam-preview {
+            position: absolute;
+            top: 50px; /* 避开状态栏 */
+            left: 15px;
+            width: 100px;
+            height: 75px; /* 4:3 比例 */
+            background: #000;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.2);
+            opacity: 0.8;
+            transform: scaleX(-1);
+            z-index: 5;
+            display: none; /* 默认隐藏，启动后显示 */
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <!-- 启动页 -->
+    <div id="start-overlay">
+        <h2>✨ 3D手势粒子</h2>
+        <p>
+            1. 请确保使用 <strong>HTTPS</strong> 链接<br>
+            2. 点击下方按钮启动<br>
+            3. 允许摄像头权限<br>
+            4. 举起手掌，握拳可收缩粒子
+        </p>
+        <button id="start-btn">开始体验</button>
+        <div style="font-size:12px; color:#666; margin-top:20px;">
+            如果在微信无法打开，请点击右上角<br>选择“在浏览器打开”
+        </div>
+    </div>
+
+    <div id="status-bar">
+        <div id="status-text">等待启动...</div>
+    </div>
+
+    <!-- 
+      微信专用 Video 标签属性：
+      playsinline, webkit-playsinline: iOS 防止全屏
+      x5-video-player-type="h5-page": 安卓微信同层播放
+      x5-playsinline: 安卓禁止全屏
+    -->
+    <video id="input_video" 
+           playsinline 
+           webkit-playsinline 
+           x5-video-player-type="h5-page"
+           x5-playsinline="true"
+           muted
+           autoplay></video>
+           
+    <canvas id="webcam-preview"></canvas>
+
+    <div id="ui-container">
+        <div id="ui-handle"></div>
+        <h2 class="panel-title">
+            控制台 
+            <span id="hand-val" style="color:#00d2ff; font-size:12px;">系数: 1.0</span>
+        </h2>
+
+        <div class="control-group">
+            <div id="shape-buttons">
+                <div class="shape-btn active" data-shape="heart">爱心</div>
+                <div class="shape-btn" data-shape="saturn">土星</div>
+                <div class="shape-btn" data-shape="firework">烟花</div>
+                <div class="shape-btn" data-shape="flower">花朵</div>
+                <div class="shape-btn" data-shape="buddha">禅</div>
+                <div class="shape-btn" data-shape="sphere">球体</div>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>粒子颜色</label>
+            <input type="color" id="color-picker" value="#00d2ff">
+        </div>
+    </div>
+
+<script>
+    // ================= 配置 =================
+    // 移动端性能优化：粒子数减少到 12000
+    const PARTICLE_COUNT = 12000; 
+    const PARTICLE_SIZE = 0.15; 
+    const TRANSITION_SPEED = 0.08;
+    const HAND_SENSITIVITY = 0.2;
+
+    let scene, camera, renderer, particles, material;
+    let currentShape = 'heart';
+    let basePositions = new Float32Array(PARTICLE_COUNT * 3);
+    let currentColor = new THREE.Color(0x00d2ff);
+    
+    // 手势状态
+    let handScaleFactor = 1.0;
+    let targetHandScale = 1.0;
+
+    const statusEl = document.getElementById('status-text');
+    const handValEl = document.getElementById('hand-val');
+    const previewCanvas = document.getElementById('webcam-preview');
+    const previewCtx = previewCanvas.getContext('2d');
+    const videoElement = document.getElementById('input_video');
+
+    // ================= Three.js 逻辑 =================
+    function initThree() {
+        scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050505, 0.025);
+
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 28;
+        camera.position.y = 0;
+
+        renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true }); // 关闭抗锯齿提升手机性能
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.insertBefore(renderer.domElement, document.body.firstChild);
+
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        
+        // 初始随机位置
+        for(let i=0; i<PARTICLE_COUNT*3; i++) positions[i] = (Math.random()-0.5)*50;
+        
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        material = new THREE.PointsMaterial({
+            color: currentColor,
+            size: PARTICLE_SIZE,
+            sizeAttenuation: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            transparent: true,
+            opacity: 0.9
+        });
+
+        particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        generateShape('heart');
+        window.addEventListener('resize', onWindowResize, false);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // ================= 形状生成 =================
+    function getPoint(type, idx) {
+        const u = Math.random();
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        let x=0, y=0, z=0;
+
+        switch(type) {
+            case 'heart':
+                x = 16 * Math.pow(Math.sin(theta), 3);
+                y = 13 * Math.cos(theta) - 5 * Math.cos(2*theta) - 2 * Math.cos(3*theta) - Math.cos(4*theta);
+                z = (Math.random()-0.5) * 6;
+                { const s = Math.cbrt(Math.random()) * 0.5; x*=s; y*=s; z*=s; y+=2;}
+                break;
+            case 'saturn':
+                if(Math.random()>0.3) {
+                    const r = 6 * Math.cbrt(Math.random());
+                    x = r * Math.sin(phi) * Math.cos(theta);
+                    y = r * Math.sin(phi) * Math.sin(theta);
+                    z = r * Math.cos(phi);
+                } else {
+                    const r = Math.sqrt(Math.random()*(196-64)+64);
+                    x = r * Math.cos(theta); z = r * Math.sin(theta);
+                    y = (Math.random()-0.5)*0.5;
+                    const t = 0.4;
+                    const yt = y*Math.cos(t) - z*Math.sin(t);
+                    const zt = y*Math.sin(t) + z*Math.cos(t);
+                    y=yt; z=zt;
+                }
+                break;
+            case 'firework':
+                { const r=15*Math.cbrt(Math.random()); x=r*Math.sin(phi)*Math.cos(theta); y=r*Math.sin(phi)*Math.sin(theta); z=r*Math.cos(phi); if(Math.random()>0.92){x*=1.6;y*=1.6;z*=1.6;} }
+                break;
+            case 'sphere':
+                { const r=10*Math.cbrt(Math.random()); x=r*Math.sin(phi)*Math.cos(theta); y=r*Math.sin(phi)*Math.sin(theta); z=r*Math.cos(phi); }
+                break;
+            case 'buddha': // 简化版
+                {
+                    const d = Math.random();
+                    if(d<0.2){ const r=2.5*Math.cbrt(Math.random()); x=r*Math.sin(phi)*Math.cos(theta); y=r*Math.sin(phi)*Math.sin(theta)+6; z=r*Math.cos(phi); }
+                    else if(d<0.6){ const r=4.5*Math.cbrt(Math.random()); x=r*Math.sin(phi)*Math.cos(theta); y=r*Math.sin(phi)*Math.sin(theta)*1.2; z=r*Math.cos(phi)*0.8; }
+                    else { const r=6*Math.sqrt(Math.random()); x=r*Math.cos(theta); z=r*Math.sin(theta)*0.8; y=(Math.random()-1)*2-3; }
+                }
+                break;
+            case 'flower':
+                 { const k=3; const r=10*Math.cos(k*theta)+5; const rv=r*Math.random(); x=rv*Math.cos(theta); y=rv*Math.sin(theta); z=(Math.random()-0.5)*4; z+=Math.cos(theta*k)*2; }
+                 break;
+        }
+        return {x,y,z};
+    }
+
+    function generateShape(shape) {
+        currentShape = shape;
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const p = getPoint(shape, i);
+            basePositions[i*3] = p.x;
+            basePositions[i*3+1] = p.y;
+            basePositions[i*3+2] = p.z;
+        }
+    }
+
+    // ================= MediaPipe & 交互 =================
+    function onResults(results) {
+        // 降低预览频率或质量以省电
+        previewCanvas.width = 160; 
+        previewCanvas.height = 120;
+        previewCtx.drawImage(results.image, 0, 0, previewCanvas.width, previewCanvas.height);
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            statusEl.innerText = "已捕获手势";
+            statusEl.style.color = "#00ff00";
+            
+            // 简单计算拇指和食指距离
+            const marks = results.multiHandLandmarks[0];
+            const p1 = marks[4]; // 拇指
+            const p2 = marks[8]; // 食指
+            const dist = Math.sqrt(Math.pow(p1.x-p2.x, 2) + Math.pow(p1.y-p2.y, 2));
+            
+            // 粗略归一化: 距离0.05视作闭合，0.25视作张开
+            let ratio = (dist - 0.05) / 0.2; 
+            if(ratio < 0) ratio = 0;
+            if(ratio > 1) ratio = 1;
+
+            // 映射到缩放: 0 -> 0.4倍, 1 -> 2.2倍
+            targetHandScale = 0.4 + ratio * 1.8;
+            handValEl.innerText = "张合度: " + Math.round(ratio*100) + "%";
+        } else {
+            statusEl.innerText = "请将手放入镜头";
+            statusEl.style.color = "#00d2ff";
+            targetHandScale = 1.0;
+        }
+    }
+
+    // ================= 启动逻辑 =================
+    document.getElementById('start-btn').addEventListener('click', async () => {
+        // 1. 检查 HTTPS
+        if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+            alert("⚠️ 错误：必须使用 HTTPS 协议。\n\n微信或手机浏览器为了安全，禁止非 HTTPS 网站使用摄像头。\n\n请将代码部署到 GitHub Pages 等平台。");
+            return;
+        }
+
+        const overlay = document.getElementById('start-overlay');
+        overlay.style.opacity = '0';
+        setTimeout(() => overlay.style.display = 'none', 500);
+        
+        document.getElementById('webcam-preview').style.display = 'block';
+        statusEl.innerText = "正在请求摄像头...";
+
+        initThree();
+        animate();
+
+        // 2. 初始化 MediaPipe
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0, // Lite模型，手机必选
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onResults);
+
+        // 3. 启动摄像头
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                // 微信 hack: 确保视频有尺寸才处理
+                if(videoElement.videoWidth) await hands.send({image: videoElement});
+            },
+            width: 320, // 降低处理分辨率
+            height: 240,
+            facingMode: 'user'
+        });
+
+        cameraUtils.start().then(() => {
+             console.log("Camera started");
+        }).catch(err => {
+            console.error(err);
+            alert("无法启动摄像头。\n1. 请检查是否允许了权限。\n2. 微信请尝试点击右上角选择'在浏览器打开'。");
+            statusEl.innerText = "启动失败";
+            statusEl.style.color = "red";
+        });
+    });
+
+    // ================= 动画循环 =================
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // 手势平滑插值
+        handScaleFactor += (targetHandScale - handScaleFactor) * HAND_SENSITIVITY;
+
+        // 粒子更新
+        if (particles) {
+            particles.rotation.y += 0.002;
+            const pos = particles.geometry.attributes.position.array;
+            
+            for(let i=0; i<PARTICLE_COUNT; i++) {
+                const i3 = i*3;
+                // 目标位置 = 基础形状 * 手势缩放
+                const tx = basePositions[i3] * handScaleFactor;
+                const ty = basePositions[i3+1] * handScaleFactor;
+                const tz = basePositions[i3+2] * handScaleFactor;
+
+                // 移动插值
+                pos[i3] += (tx - pos[i3]) * TRANSITION_SPEED;
+                pos[i3+1] += (ty - pos[i3+1]) * TRANSITION_SPEED;
+                pos[i3+2] += (tz - pos[i3+2]) * TRANSITION_SPEED;
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+    }
+
+    // UI 事件
+    document.getElementById('shape-buttons').addEventListener('click', (e) => {
+        if(e.target.classList.contains('shape-btn')) {
+            document.querySelectorAll('.shape-btn').forEach(b=>b.classList.remove('active'));
+            e.target.classList.add('active');
+            generateShape(e.target.dataset.shape);
+        }
+    });
+    document.getElementById('color-picker').addEventListener('input', (e) => {
+        material.color.set(e.target.value);
+    });
+</script>
+</body>
+</html>
