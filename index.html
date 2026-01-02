@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>指尖魔法 - 奢华质感版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Microsoft YaHei', sans-serif; }
+        
+        #input_video { position: absolute; top: -1000px; left: -1000px; opacity: 0; }
+        
+        #ui-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 10;
+        }
+
+        /* 顶部标题装饰 */
+        #header-deco {
+            position: absolute; top: 20px; width: 100%; text-align: center;
+            color: #d4af37; font-size: 14px; letter-spacing: 3px; font-weight: 300;
+            text-transform: uppercase; text-shadow: 0 0 10px rgba(212, 175, 55, 0.5);
+        }
+
+        #fullscreen-btn {
+            position: absolute; top: 20px; right: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            color: #d4af37; border: 1px solid rgba(212, 175, 55, 0.4);
+            padding: 8px 16px; border-radius: 4px; cursor: pointer;
+            pointer-events: auto; backdrop-filter: blur(5px); font-size: 12px;
+        }
+
+        #upload-container {
+            position: absolute; top: 20px; left: 20px; pointer-events: auto;
+        }
+        
+        #upload-label {
+            display: inline-flex; align-items: center; gap: 8px;
+            background: rgba(20, 20, 20, 0.8);
+            border: 1px solid #d4af37;
+            color: #d4af37; padding: 10px 20px; border-radius: 2px;
+            font-size: 13px; letter-spacing: 1px; cursor: pointer;
+            transition: all 0.3s;
+        }
+        #upload-label:hover { background: #d4af37; color: #000; }
+
+        #status-text {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #d4af37; font-size: 16px; letter-spacing: 2px;
+            text-shadow: 0 0 15px rgba(212, 175, 55, 0.6); display: none;
+        }
+
+        #text-canvas { display: none; }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+
+    <div id="ui-container">
+        <div id="header-deco">MERRY CHRISTMAS & HAPPY NEW YEAR</div>
+        <div id="upload-container">
+            <label id="upload-label" for="file-input">
+                <span>✦</span> UPLOAD MEMORIES
+            </label>
+            <input type="file" id="file-input" multiple accept="image/*" style="display:none;">
+        </div>
+        <button id="fullscreen-btn">VIEW FULLSCREEN</button>
+        <div id="status-text"></div>
+    </div>
+    
+    <video id="input_video" playsinline webkit-playsinline muted autoplay></video>
+    <canvas id="text-canvas"></canvas>
+
+<script>
+    // ================= 配置区域 =================
+    const PARTICLE_COUNT = 4500; // 粒子数量
+    
+    // ================= 色盘配置 (高级混色) =================
+    const PALETTES = [
+        // 0. 经典红金黑 (图示风格)
+        { name: "Classic", colors: [0xD4AF37, 0x8B0000, 0x111111] }, // 金, 深红, 黑
+        // 1. 冰雪奇缘
+        { name: "Frozen", colors: [0xA5F2F3, 0xFFFFFF, 0x0047AB] }, // 冰蓝, 白, 深蓝
+        // 2. 赛博朋克
+        { name: "Cyber", colors: [0xFF00CC, 0x3333FF, 0x000000] }, // 粉, 蓝, 黑
+        // 3. 紫金奢华
+        { name: "Luxury", colors: [0x9B30FF, 0xFFD700, 0x220022] }, // 紫, 金, 深紫
+        // 4. 翡翠森林
+        { name: "Forest", colors: [0x2E8B57, 0x98FB98, 0x006400] }  // 绿, 浅绿, 深绿
+    ];
+    let currentPaletteIndex = 0;
+
+    // ================= 全局变量 =================
+    let scene, camera, renderer;
+    // 3种形状: 立方体(主), 球体(辅), 钻石(点缀)
+    let meshBoxes, meshSpheres, meshDiamonds; 
+    let photoGroup, balloonGroup;
+    
+    // 粒子数据
+    let currentPositions = new Float32Array(PARTICLE_COUNT * 3);
+    let targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+    let rotations = new Float32Array(PARTICLE_COUNT * 3);
+    let rotationSpeeds = new Float32Array(PARTICLE_COUNT * 3);
+    
+    // 粒子颜色属性 (用于InstanceMesh)
+    let instanceColors = []; // 存储分配给每个粒子的颜色索引 0,1,2
+
+    const STATE = { IDLE: 0, NUM_1: 1, NUM_2: 2, NUM_3: 3, NEW_YEAR: 4, GALLERY: 5 };
+    let currentState = STATE.NEW_YEAR;
+    let sceneRotationY = 0;
+    let targetRotationY = 0;
+    let lastWristX = null;
+
+    // ================= 初始化 =================
+    function init() {
+        scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.0025); // 纯黑背景 + 雾
+
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 85;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        // 开启物理光照计算
+        renderer.physicallyCorrectLights = true;
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        document.body.appendChild(renderer.domElement);
+
+        // --- 影棚级灯光系统 ---
+        // 1. 环境光 (基础亮度)
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+        // 2. 主光源 (金色暖光，侧前方)
+        const mainLight = new THREE.DirectionalLight(0xffd700, 2.5);
+        mainLight.position.set(20, 20, 50);
+        scene.add(mainLight);
+        // 3. 轮廓光 (冷白光，背侧)
+        const rimLight = new THREE.DirectionalLight(0xffffff, 3.0);
+        rimLight.position.set(-20, 10, -20);
+        scene.add(rimLight);
+        // 4. 补光 (点光源，中心)
+        const pointLight = new THREE.PointLight(0xffaa00, 5, 100);
+        pointLight.position.set(0, 0, 10);
+        scene.add(pointLight);
+
+        initLuxParticles(); 
+        initBalloons();
+        
+        photoGroup = new THREE.Group();
+        scene.add(photoGroup);
+
+        generateTextShape("2026\n新年快乐");
+        
+        window.addEventListener('resize', onWindowResize, false);
+        document.getElementById('fullscreen-btn').addEventListener('click', toggleFullScreen);
+        document.getElementById('file-input').addEventListener('change', handleUpload);
+
+        animate();
+    }
+
+    // ================= 奢华粒子系统 =================
+    function initLuxParticles() {
+        // PBR 物理材质：金属感
+        const mat = new THREE.MeshStandardMaterial({
+            color: 0xffffff,    // 基础白，通过 instanceColor 染色
+            roughness: 0.2,     // 光滑
+            metalness: 0.8,     // 高金属度
+            emissive: 0x000000,
+            flatShading: false  // 平滑着色
+        });
+
+        // 1. 立方体 (图中主要的方块)
+        const geoBox = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+        // 2. 球体 (圆润点缀)
+        const geoSphere = new THREE.SphereGeometry(0.4, 16, 16);
+        // 3. 钻石体/八面体 (闪光点)
+        const geoDiamond = new THREE.OctahedronGeometry(0.5, 0);
+
+        // 分配数量：方块最多(50%)，球体(30%)，钻石(20%)
+        const countBox = Math.floor(PARTICLE_COUNT * 0.5);
+        const countSphere = Math.floor(PARTICLE_COUNT * 0.3);
+        const countDiamond = PARTICLE_COUNT - countBox - countSphere;
+
+        meshBoxes = new THREE.InstancedMesh(geoBox, mat, countBox);
+        meshSpheres = new THREE.InstancedMesh(geoSphere, mat, countSphere);
+        meshDiamonds = new THREE.InstancedMesh(geoDiamond, mat, countDiamond);
+
+        scene.add(meshBoxes);
+        scene.add(meshSpheres);
+        scene.add(meshDiamonds);
+
+        // 初始化数据
+        const dummy = new THREE.Object3D();
+        const color = new THREE.Color();
+        const palette = PALETTES[0].colors; // 默认红金黑
+
+        let offset = 0;
+        
+        // 辅助函数：初始化一批 Mesh
+        const initBatch = (mesh, count) => {
+            for (let i = 0; i < count; i++) {
+                const globalIndex = offset + i;
+                const i3 = globalIndex * 3;
+
+                // 位置
+                currentPositions[i3] = (Math.random() - 0.5) * 200;
+                currentPositions[i3+1] = (Math.random() - 0.5) * 200;
+                currentPositions[i3+2] = (Math.random() - 0.5) * 200;
+                targetPositions[i3] = currentPositions[i3];
+                targetPositions[i3+1] = currentPositions[i3+1];
+                targetPositions[i3+2] = currentPositions[i3+2];
+
+                // 旋转
+                rotations[i3] = Math.random() * Math.PI;
+                rotations[i3+1] = Math.random() * Math.PI;
+                rotations[i3+2] = Math.random() * Math.PI;
+                rotationSpeeds[i3] = (Math.random() - 0.5) * 0.05;
+                rotationSpeeds[i3+1] = (Math.random() - 0.5) * 0.05;
+                rotationSpeeds[i3+2] = (Math.random() - 0.5) * 0.05;
+
+                // 颜色：随机分配 0, 1, 2 对应色盘中的三种颜色
+                const colorType = Math.floor(Math.random() * 3);
+                instanceColors[globalIndex] = colorType; 
+                
+                color.setHex(palette[colorType]);
+                mesh.setColorAt(i, color);
+
+                // 随机大小：方块大一些，球体小一些
+                const scale = 0.5 + Math.random() * 1.0;
+                dummy.scale.setScalar(scale);
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+            }
+            offset += count;
+        };
+
+        initBatch(meshBoxes, countBox);
+        initBatch(meshSpheres, countSphere);
+        initBatch(meshDiamonds, countDiamond);
+    }
+
+    // 更新粒子位置 (动画循环中)
+    function updateParticleSystem() {
+        const dummy = new THREE.Object3D();
+        let offset = 0;
+
+        const updateBatch = (mesh, count) => {
+            for (let i = 0; i < count; i++) {
+                const globalIndex = offset + i;
+                const i3 = globalIndex * 3;
+
+                // 1. Lerp 位置
+                currentPositions[i3] += (targetPositions[i3] - currentPositions[i3]) * 0.08;
+                currentPositions[i3+1] += (targetPositions[i3+1] - currentPositions[i3+1]) * 0.08;
+                currentPositions[i3+2] += (targetPositions[i3+2] - currentPositions[i3+2]) * 0.08;
+
+                // 2. 自转
+                rotations[i3] += rotationSpeeds[i3];
+                rotations[i3+1] += rotationSpeeds[i3+1];
+                rotations[i3+2] += rotationSpeeds[i3+2];
+
+                dummy.position.set(currentPositions[i3], currentPositions[i3+1], currentPositions[i3+2]);
+                dummy.rotation.set(rotations[i3], rotations[i3+1], rotations[i3+2]);
+                
+                // 保持原来的缩放大小 (为了简单，这里需要获取原来的矩阵scale，或者存起来。这里为了性能简化重算一个近似随机值或存入数组)
+                // 为保证闪烁感，可以让Scale微微波动
+                const time = Date.now() * 0.002;
+                const scaleBase = 1.0; 
+                // 简单的呼吸效果
+                const scale = scaleBase + Math.sin(time + globalIndex)*0.1;
+                dummy.scale.setScalar(scale);
+
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+            }
+            mesh.instanceMatrix.needsUpdate = true;
+            offset += count;
+        };
+
+        updateBatch(meshBoxes, meshBoxes.count);
+        updateBatch(meshSpheres, meshSpheres.count);
+        updateBatch(meshDiamonds, meshDiamonds.count);
+    }
+
+    // 切换配色 (随机选择一个色盘)
+    function applyRandomPalette() {
+        // 随机选一个新色盘 (不与当前重复)
+        let newIndex;
+        do {
+            newIndex = Math.floor(Math.random() * PALETTES.length);
+        } while (newIndex === currentPaletteIndex && PALETTES.length > 1);
+        
+        currentPaletteIndex = newIndex;
+        const palette = PALETTES[currentPaletteIndex].colors;
+        const color = new THREE.Color();
+
+        let offset = 0;
+        const applyToMesh = (mesh, count) => {
+            for(let i=0; i<count; i++) {
+                const globalIndex = offset + i;
+                const colorType = instanceColors[globalIndex]; // 获取该粒子属于 0,1,2 哪一类
+                color.setHex(palette[colorType]);
+                mesh.setColorAt(i, color);
+            }
+            mesh.instanceColor.needsUpdate = true;
+            offset += count;
+        };
+
+        applyToMesh(meshBoxes, meshBoxes.count);
+        applyToMesh(meshSpheres, meshSpheres.count);
+        applyToMesh(meshDiamonds, meshDiamonds.count);
+    }
+
+    // ================= 功能函数 =================
+    function handleUpload(event) {
+        const files = event.target.files;
+        if (files.length === 0) return;
+        while(photoGroup.children.length > 0) photoGroup.remove(photoGroup.children[0]); 
+        
+        Array.from(files).forEach((file, index) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.src = e.target.result;
+                img.onload = () => {
+                    const texture = new THREE.Texture(img);
+                    texture.needsUpdate = true;
+                    createPhotoMesh(texture, index, files.length);
+                    
+                    if (currentState === STATE.GALLERY) photoGroup.visible = true;
+                    else {
+                        const tip = document.getElementById('status-text');
+                        tip.innerHTML = "MEMORIES LOADED<br>OPEN HAND TO VIEW";
+                        tip.style.display = 'block';
+                        setTimeout(() => tip.style.display = 'none', 3000);
+                    }
+                };
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    function createPhotoMesh(texture, index, total) {
+        const aspect = texture.image.width / texture.image.height;
+        const geo = new THREE.PlaneGeometry(12 * aspect, 12);
+        const mat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, transparent: true });
+        const mesh = new THREE.Mesh(geo, mat);
+        
+        // 金边
+        const borderGeo = new THREE.PlaneGeometry(12 * aspect + 0.5, 12 + 0.5);
+        const borderMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 1.0, roughness: 0.1 });
+        const border = new THREE.Mesh(borderGeo, borderMat);
+        border.position.z = -0.1;
+        mesh.add(border);
+
+        const phi = Math.acos(-1 + (2 * index) / total);
+        const theta = Math.sqrt(total * Math.PI) * phi;
+        const radius = 45;
+        mesh.position.setFromSphericalCoords(radius, phi, theta);
+        mesh.lookAt(0, 0, 0);
+        photoGroup.add(mesh);
+    }
+
+    function initBalloons() {
+        balloonGroup = new THREE.Group();
+        scene.add(balloonGroup);
+        balloonGroup.visible = false;
+        
+        const geometry = new THREE.SphereGeometry(2.5, 32, 32);
+        // 气球也是金属质感
+        const material = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.3, roughness: 0.2 });
+        balloonMesh = new THREE.InstancedMesh(geometry, material, 60);
+        balloonGroup.add(balloonMesh);
+        
+        balloonData = [];
+        const dummy = new THREE.Object3D();
+        const color = new THREE.Color();
+        for (let i = 0; i < 60; i++) {
+            const x = (Math.random()-0.5)*140;
+            const y = -80 - Math.random()*80;
+            const z = (Math.random()-0.5)*60;
+            dummy.position.set(x,y,z);
+            dummy.updateMatrix();
+            balloonMesh.setMatrixAt(i, dummy.matrix);
+            
+            // 气球颜色也随机
+            color.setHSL(Math.random(), 0.8, 0.6);
+            balloonMesh.setColorAt(i, color);
+            balloonData.push({x, y, z, speed: 0.3+Math.random()*0.5, wobble: Math.random()*Math.PI});
+        }
+    }
+    let balloonMesh, balloonData;
+
+    function animateBalloons() {
+        if (!balloonGroup.visible) return;
+        const dummy = new THREE.Object3D();
+        for (let i = 0; i < 60; i++) {
+            const data = balloonData[i];
+            data.y += data.speed;
+            data.wobble += 0.03;
+            if (data.y > 80) data.y = -80;
+            dummy.position.set(data.x + Math.sin(data.wobble)*3, data.y, data.z);
+            dummy.updateMatrix();
+            balloonMesh.setMatrixAt(i, dummy.matrix);
+        }
+        balloonMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    // ================= 目标生成 =================
+    function generateTextShape(text) {
+        const canvas = document.getElementById('text-canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 400; canvas.height = 200;
+        ctx.fillStyle = '#000'; ctx.fillRect(0,0,400,200);
+        ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.font = 'bold 70px "Microsoft YaHei"';
+        const lines = text.split('\n');
+        lines.forEach((line, i) => ctx.fillText(line, 200, 100 + (i - (lines.length-1)/2)*80));
+        const data = ctx.getImageData(0,0,400,200).data;
+        const coords = [];
+        for(let y=0; y<200; y+=3) { // 稍微稀疏一点，因为Box比较大
+            for(let x=0; x<400; x+=3) {
+                if(data[(y*400+x)*4] > 128) coords.push({x: (x-200)*0.7, y: -(y-100)*0.7, z: 0});
+            }
+        }
+        updateTargets(coords);
+    }
+
+    function generateExplosion() {
+        const coords = [];
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const r = 60 + Math.random()*60;
+            const theta = Math.random()*Math.PI*2;
+            const phi = Math.acos(2*Math.random()-1);
+            coords.push({x: r*Math.sin(phi)*Math.cos(theta), y: r*Math.sin(phi)*Math.sin(theta), z: r*Math.cos(phi)});
+        }
+        updateTargets(coords);
+    }
+
+    function updateTargets(coords) {
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const i3 = i*3;
+            if(i < coords.length) {
+                targetPositions[i3] = coords[i].x;
+                targetPositions[i3+1] = coords[i].y;
+                targetPositions[i3+2] = coords[i].z;
+            } else {
+                targetPositions[i3] = (Math.random()-0.5)*350;
+                targetPositions[i3+1] = (Math.random()-0.5)*350;
+                targetPositions[i3+2] = (Math.random()-0.5)*350;
+            }
+        }
+    }
+
+    // ================= 控制 =================
+    function switchState(newState) {
+        if (currentState === newState) return;
+        currentState = newState;
+        
+        // 切换状态时，换一套配色
+        applyRandomPalette();
+
+        photoGroup.visible = false;
+        balloonGroup.visible = false;
+
+        if (newState === STATE.NUM_1) generateTextShape("1");
+        else if (newState === STATE.NUM_2) generateTextShape("2");
+        else if (newState === STATE.NUM_3) generateTextShape("3");
+        else if (newState === STATE.NEW_YEAR) {
+            generateTextShape("2026\n新年快乐");
+            balloonGroup.visible = true;
+            targetRotationY = 0; 
+            camera.position.z = 85;
+        }
+        else if (newState === STATE.GALLERY) {
+            generateExplosion();
+            photoGroup.visible = true;
+        }
+    }
+
+    // ================= MediaPipe =================
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+    
+    hands.onResults((results) => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const lm = results.multiHandLandmarks[0];
+            let count = 0;
+            const isRight = results.multiHandedness[0].label === 'Right';
+            if (isRight ? lm[4].x < lm[3].x : lm[4].x > lm[3].x) count++;
+            if (lm[8].y < lm[6].y) count++;
+            if (lm[12].y < lm[10].y) count++;
+            if (lm[16].y < lm[14].y) count++;
+            if (lm[20].y < lm[18].y) count++;
+
+            if (count === 0) switchState(STATE.NEW_YEAR);
+            else if (count === 1) switchState(STATE.NUM_1);
+            else if (count === 2) switchState(STATE.NUM_2);
+            else if (count === 3) switchState(STATE.NUM_3);
+            else if (count >= 4) switchState(STATE.GALLERY);
+
+            const wrist = lm[0];
+            if (lastWristX !== null) targetRotationY += (wrist.x - lastWristX) * 5;
+            lastWristX = wrist.x;
+
+            if (currentState === STATE.GALLERY) {
+                const dist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+                camera.position.z = THREE.MathUtils.lerp(camera.position.z, dist < 0.05 ? 35 : 85, 0.1);
+            }
+        } else {
+            lastWristX = null;
+            if (currentState === STATE.GALLERY) targetRotationY += 0.003;
+        }
+    });
+
+    const cam = new Camera(document.getElementById('input_video'), {
+        onFrame: async () => await hands.send({image: document.getElementById('input_video')}),
+        width: 320, height: 240, facingMode: 'user'
+    });
+    cam.start();
+
+    // ================= 动画循环 =================
+    function animate() {
+        requestAnimationFrame(animate);
+
+        updateParticleSystem();
+
+        sceneRotationY += (targetRotationY - sceneRotationY) * 0.1;
+        scene.rotation.y = sceneRotationY;
+
+        if (currentState === STATE.NEW_YEAR) animateBalloons();
+        if (photoGroup.visible) photoGroup.children.forEach(mesh => mesh.lookAt(camera.position));
+
+        renderer.render(scene, camera);
+    }
+
+    function toggleFullScreen() {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else if (document.exitFullscreen) document.exitFullscreen();
+    }
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    init();
+</script>
+</body>
+</html>
