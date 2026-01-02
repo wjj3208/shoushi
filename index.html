@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>指尖魔法 - 2026新年版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Microsoft YaHei', sans-serif; }
+        
+        /* 隐藏视频输入 */
+        #input_video { position: absolute; top: -1000px; left: -1000px; opacity: 0; }
+        
+        /* 纯净UI：右上角全屏按钮 */
+        #fullscreen-btn {
+            position: absolute; top: 20px; right: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            color: white; border: 1px solid rgba(255,255,255,0.4);
+            padding: 8px 15px; border-radius: 4px; cursor: pointer;
+            z-index: 100; backdrop-filter: blur(5px);
+        }
+        
+        /* 加载提示 */
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #ffd700; font-size: 14px; pointer-events: none;
+        }
+
+        /* 调试画布隐藏 */
+        #text-canvas { display: none; }
+    </style>
+
+    <!-- 依赖库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+
+    <button id="fullscreen-btn">⛶ 全屏</button>
+    <div id="loading">正在初始化视觉引擎...</div>
+    
+    <video id="input_video" playsinline webkit-playsinline muted autoplay></video>
+    <canvas id="text-canvas"></canvas>
+
+<script>
+    // ================= 配置区域 =================
+    const PARTICLE_COUNT = 15000; // 粒子总数
+    const IMAGE_URLS = [
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/1.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/2.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/3.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/4.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/5.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/6.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/7.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/8.jpg',
+        'https://kdi-3qi-wjj.oss-cn-hangzhou.aliyuncs.com/9.jpg'
+    ];
+
+    // ================= 全局变量 =================
+    let scene, camera, renderer;
+    let particles, particleGeo, particleMat;
+    let photoGroup; // 存放照片Mesh的组
+    let balloonGroup; // 存放气球和花的组
+    
+    // 粒子位置数据
+    let currentPositions = new Float32Array(PARTICLE_COUNT * 3);
+    let targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+    let particleColors = new Float32Array(PARTICLE_COUNT * 3);
+
+    // 状态机
+    const STATE = {
+        IDLE: 0,
+        NUM_1: 1,
+        NUM_2: 2,
+        NUM_3: 3,
+        NEW_YEAR: 4, // 握拳
+        GALLERY: 5   // 张开手
+    };
+    let currentState = STATE.NEW_YEAR; // 默认新年状态
+
+    // 交互变量
+    let sceneRotationY = 0;
+    let targetRotationY = 0;
+    let lastWristX = null;
+    let pinchFactor = 0; // 0=无捏合, 1=完全捏合
+    let interactionMode = 'rotate'; // 'rotate' or 'zoom'
+
+    // ================= 初始化 Three.js =================
+    function init() {
+        scene = new THREE.Scene();
+        // 纯黑背景，带一点点环境光雾
+        scene.fog = new THREE.FogExp2(0x000000, 0.002);
+
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 80;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+
+        // 初始化粒子系统
+        initParticles();
+        
+        // 初始化照片墙
+        initPhotoGallery();
+
+        // 初始化气球系统
+        initBalloons();
+
+        // 默认先生成新年文字
+        generateTextShape("2026\n新年快乐");
+
+        // 监听调整大小
+        window.addEventListener('resize', onWindowResize, false);
+        
+        // 全屏按钮
+        document.getElementById('fullscreen-btn').addEventListener('click', toggleFullScreen);
+        
+        document.getElementById('loading').style.display = 'none';
+        animate();
+    }
+
+    // ================= 粒子系统 =================
+    function initParticles() {
+        particleGeo = new THREE.BufferGeometry();
+        
+        // 初始化位置
+        for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+            currentPositions[i] = (Math.random() - 0.5) * 200;
+            targetPositions[i] = currentPositions[i];
+            particleColors[i] = 1.0; // 默认为白
+        }
+
+        particleGeo.setAttribute('position', new THREE.BufferAttribute(currentPositions, 3));
+        particleGeo.setAttribute('color', new THREE.BufferAttribute(particleColors, 3));
+
+        // 粒子材质
+        const sprite = new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/disc.png');
+        particleMat = new THREE.PointsMaterial({
+            size: 0.8,
+            map: sprite,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+
+        particles = new THREE.Points(particleGeo, particleMat);
+        scene.add(particles);
+    }
+
+    // ================= 照片墙系统 =================
+    function initPhotoGallery() {
+        photoGroup = new THREE.Group();
+        scene.add(photoGroup);
+        photoGroup.visible = false; // 默认隐藏
+
+        const loader = new THREE.TextureLoader();
+        loader.crossOrigin = 'anonymous';
+
+        IMAGE_URLS.forEach((url, index) => {
+            loader.load(url, (texture) => {
+                const aspect = texture.image.width / texture.image.height;
+                const geo = new THREE.PlaneGeometry(10 * aspect, 10);
+                const mat = new THREE.MeshBasicMaterial({ 
+                    map: texture, 
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                    opacity: 0.9 
+                });
+                
+                const mesh = new THREE.Mesh(geo, mat);
+                
+                // 金色边框
+                const borderGeo = new THREE.PlaneGeometry(10 * aspect + 0.5, 10 + 0.5);
+                const borderMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+                const border = new THREE.Mesh(borderGeo, borderMat);
+                border.position.z = -0.1;
+                mesh.add(border);
+
+                // 随机分布在球面上
+                const phi = Math.acos(-1 + (2 * index) / IMAGE_URLS.length);
+                const theta = Math.sqrt(IMAGE_URLS.length * Math.PI) * phi;
+                const radius = 35;
+
+                mesh.position.setFromSphericalCoords(radius, phi, theta);
+                mesh.lookAt(0, 0, 0);
+                
+                // 保存初始位置以便动画
+                mesh.userData.basePos = mesh.position.clone();
+                mesh.userData.baseRot = mesh.rotation.clone();
+                
+                photoGroup.add(mesh);
+            });
+        });
+    }
+
+    // ================= 气球与鲜花系统 (InstancedMesh) =================
+    let balloons;
+    const BALLOON_COUNT = 50;
+    const balloonData = [];
+
+    function initBalloons() {
+        balloonGroup = new THREE.Group();
+        scene.add(balloonGroup);
+        balloonGroup.visible = false;
+
+        // 简单的气球几何体 (球体 + 锥体底部)
+        const geometry = new THREE.SphereGeometry(2, 16, 16);
+        const material = new THREE.MeshBasicMaterial({ color: 0xff3333 }); // 红色气球
+        
+        balloons = new THREE.InstancedMesh(geometry, material, BALLOON_COUNT);
+        balloonGroup.add(balloons);
+
+        const dummy = new THREE.Object3D();
+        const color = new THREE.Color();
+
+        for (let i = 0; i < BALLOON_COUNT; i++) {
+            // 随机位置（底部）
+            const x = (Math.random() - 0.5) * 100;
+            const y = -60 - Math.random() * 50; // 从屏幕下方开始
+            const z = (Math.random() - 0.5) * 50;
+            
+            dummy.position.set(x, y, z);
+            dummy.scale.setScalar(0.5 + Math.random() * 1.5);
+            dummy.updateMatrix();
+            balloons.setMatrixAt(i, dummy.matrix);
+
+            // 随机颜色 (红、金、粉)
+            if (Math.random() > 0.6) color.setHex(0xffd700);
+            else if (Math.random() > 0.3) color.setHex(0xff69b4);
+            else color.setHex(0xff0000);
+            balloons.setColorAt(i, color);
+
+            // 存储动画数据
+            balloonData.push({
+                x: x, 
+                y: y, 
+                z: z, 
+                speed: 0.2 + Math.random() * 0.3, 
+                wobble: Math.random() * Math.PI,
+                scale: dummy.scale.x
+            });
+        }
+    }
+
+    function animateBalloons() {
+        if (!balloonGroup.visible) return;
+
+        const dummy = new THREE.Object3D();
+        for (let i = 0; i < BALLOON_COUNT; i++) {
+            const data = balloonData[i];
+            
+            // 上升
+            data.y += data.speed;
+            // 摇摆
+            data.wobble += 0.02;
+            const xOffset = Math.sin(data.wobble) * 1;
+
+            // 循环
+            if (data.y > 60) data.y = -60;
+
+            dummy.position.set(data.x + xOffset, data.y, data.z);
+            dummy.scale.setScalar(data.scale);
+            dummy.updateMatrix();
+            balloons.setMatrixAt(i, dummy.matrix);
+        }
+        balloons.instanceMatrix.needsUpdate = true;
+    }
+
+    // ================= 核心：形状生成算法 =================
+    // 使用 Canvas 将文字/数字转换为点云坐标
+    function generateTextShape(text, scale = 1.0) {
+        const canvas = document.getElementById('text-canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 400;
+        canvas.height = 200;
+
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        // 自动调整字体大小
+        const fontSize = text.length > 2 ? 60 : 150;
+        ctx.font = `bold ${fontSize}px "Microsoft YaHei", sans-serif`;
+        
+        // 处理换行
+        const lines = text.toString().split('\n');
+        lines.forEach((line, i) => {
+            ctx.fillText(line, canvas.width/2, canvas.height/2 + (i - (lines.length-1)/2) * (fontSize + 10));
+        });
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        
+        const coords = [];
+        for (let y = 0; y < canvas.height; y += 2) {
+            for (let x = 0; x < canvas.width; x += 2) {
+                if (data[(y * canvas.width + x) * 4] > 128) {
+                    coords.push({
+                        x: (x - canvas.width/2) * 0.5 * scale,
+                        y: -(y - canvas.height/2) * 0.5 * scale,
+                        z: 0
+                    });
+                }
+            }
+        }
+        
+        // 分配目标位置
+        updateTargetPositions(coords);
+    }
+
+    function generateExplosionShape() {
+        // 炸开成星云状
+        const coords = [];
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const r = 40 + Math.random() * 40;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            coords.push({
+                x: r * Math.sin(phi) * Math.cos(theta),
+                y: r * Math.sin(phi) * Math.sin(theta),
+                z: r * Math.cos(phi)
+            });
+        }
+        updateTargetPositions(coords);
+    }
+
+    function updateTargetPositions(coords) {
+        // 将计算出的坐标分配给 targetPositions
+        // 如果 coords 少于 PARTICLE_COUNT，剩下的粒子飞到边缘或随机游走
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const i3 = i * 3;
+            if (i < coords.length) {
+                targetPositions[i3] = coords[i].x;
+                targetPositions[i3+1] = coords[i].y;
+                targetPositions[i3+2] = coords[i].z;
+                
+                // 文字/数字状态粒子变金色
+                if (currentState === STATE.NEW_YEAR) {
+                    particleColors[i3] = 1.0; particleColors[i3+1] = 0.84; particleColors[i3+2] = 0.0; 
+                } else {
+                    particleColors[i3] = 1.0; particleColors[i3+1] = 1.0; particleColors[i3+2] = 1.0; 
+                }
+            } else {
+                // 多余的粒子变成背景星空
+                targetPositions[i3] = (Math.random() - 0.5) * 300;
+                targetPositions[i3+1] = (Math.random() - 0.5) * 300;
+                targetPositions[i3+2] = (Math.random() - 0.5) * 300;
+                // 变暗
+                particleColors[i3] = 0.2; particleColors[i3+1] = 0.2; particleColors[i3+2] = 0.2; 
+            }
+        }
+        particleGeo.attributes.color.needsUpdate = true;
+    }
+
+    // ================= 状态管理 =================
+    function switchState(newState) {
+        if (currentState === newState) return;
+        currentState = newState;
+
+        // 默认隐藏照片和气球
+        photoGroup.visible = false;
+        balloonGroup.visible = false;
+
+        switch (newState) {
+            case STATE.NUM_1:
+                generateTextShape("1");
+                break;
+            case STATE.NUM_2:
+                generateTextShape("2");
+                break;
+            case STATE.NUM_3:
+                generateTextShape("3");
+                break;
+            case STATE.NEW_YEAR: // 握拳：重置/文字/气球
+                generateTextShape("2026\n新年快乐", 1.2);
+                balloonGroup.visible = true;
+                // 重置旋转
+                targetRotationY = 0;
+                sceneRotationY = 0;
+                scene.rotation.y = 0;
+                // 重置缩放
+                camera.position.z = 80;
+                break;
+            case STATE.GALLERY: // 张手：炸开/照片
+                generateExplosionShape();
+                photoGroup.visible = true;
+                break;
+        }
+    }
+
+    // ================= MediaPipe 逻辑 =================
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(onHandsResult);
+
+    const cameraUtils = new Camera(document.getElementById('input_video'), {
+        onFrame: async () => {
+            await hands.send({image: document.getElementById('input_video')});
+        },
+        width: 320, height: 240, facingMode: 'user'
+    });
+    cameraUtils.start();
+
+    function onHandsResult(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const lm = results.multiHandLandmarks[0];
+
+            // 1. 手指计数
+            let fingersUp = 0;
+            // 拇指 (x比较) - 需要判断左右手，这里简化判断
+            // 简单的拇指判断：指尖x是否在指节x的外侧
+            const isRightHand = results.multiHandedness[0].label === 'Right';
+            if (isRightHand ? lm[4].x < lm[3].x : lm[4].x > lm[3].x) fingersUp++; 
+            // 其他四指 (y比较) - 指尖高于指节 (y更小)
+            if (lm[8].y < lm[6].y) fingersUp++;
+            if (lm[12].y < lm[10].y) fingersUp++;
+            if (lm[16].y < lm[14].y) fingersUp++;
+            if (lm[20].y < lm[18].y) fingersUp++;
+
+            // 2. 状态映射
+            if (fingersUp === 0) switchState(STATE.NEW_YEAR); // 握拳
+            else if (fingersUp === 1) switchState(STATE.NUM_1);
+            else if (fingersUp === 2) switchState(STATE.NUM_2);
+            else if (fingersUp === 3) switchState(STATE.NUM_3);
+            else if (fingersUp >= 4) switchState(STATE.GALLERY); // 张开
+
+            // 3. 挥手旋转 (Swipe)
+            const wrist = lm[0];
+            if (lastWristX !== null) {
+                const delta = wrist.x - lastWristX;
+                // 平滑旋转，反向操作更符合直觉（像拨动地球仪）
+                targetRotationY += delta * 3; 
+            }
+            lastWristX = wrist.x;
+
+            // 4. 捏合缩放 (Pinch) - 仅在照片模式生效
+            if (currentState === STATE.GALLERY) {
+                const thumb = lm[4];
+                const index = lm[8];
+                const dist = Math.sqrt(Math.pow(thumb.x - index.x, 2) + Math.pow(thumb.y - index.y, 2));
+                
+                // 捏合判断阈值
+                if (dist < 0.05) {
+                    // 捏合中 - 放大视角
+                    camera.position.z = THREE.MathUtils.lerp(camera.position.z, 30, 0.1);
+                } else {
+                    // 松开 - 恢复视角
+                    camera.position.z = THREE.MathUtils.lerp(camera.position.z, 80, 0.1);
+                }
+            }
+
+        } else {
+            // 没有检测到手时，缓慢自动旋转展示
+            lastWristX = null;
+            if(currentState === STATE.GALLERY) {
+                targetRotationY += 0.002;
+            }
+        }
+    }
+
+    // ================= 动画循环 =================
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // 1. 粒子动画 (Lerp 插值)
+        const positions = particleGeo.attributes.position.array;
+        for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+            // 缓动：current += (target - current) * speed
+            positions[i] += (targetPositions[i] - positions[i]) * 0.08;
+        }
+        particleGeo.attributes.position.needsUpdate = true;
+
+        // 2. 场景旋转 (Swipe 惯性)
+        sceneRotationY += (targetRotationY - sceneRotationY) * 0.1;
+        scene.rotation.y = sceneRotationY;
+
+        // 3. 气球动画
+        if (currentState === STATE.NEW_YEAR) {
+            animateBalloons();
+        }
+
+        // 4. 照片墙始终面向摄像机
+        if (photoGroup.visible) {
+            photoGroup.children.forEach(mesh => {
+                mesh.lookAt(camera.position);
+            });
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    function toggleFullScreen() {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen();
+        } else {
+            if (document.exitFullscreen) document.exitFullscreen();
+        }
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // 启动
+    init();
+
+</script>
+</body>
+</html>
